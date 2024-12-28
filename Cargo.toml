@@ -1,0 +1,22 @@
+[package]
+name = "lndlite"
+version = "0.1.0"
+edition = "2021"
+authors = ["conduition <conduition@proton.me>"]
+description = "Access the Lightning Network Daemon (LND) REST API using the reqwest crate."
+readme = "README.md"
+license = "Unlicense"
+repository = "https://github.com/conduition/lndlite"
+keywords = []
+
+[dependencies]
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
+hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+http-body-util = { version = "0.1.2", default-features = false }
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1"] }
+rustls = { version = "0.23", default-features = false }
+rustls-pki-types = { version = "1", default-features = false }
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
