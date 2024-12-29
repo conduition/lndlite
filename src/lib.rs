@@ -6,6 +6,10 @@ pub use errors::*;
 pub use stream::*;
 
 use hyper::{header::HeaderValue, Method};
+use hyper_util::client::legacy::{
+    connect::{Connect, HttpConnector},
+    Client as HyperClient,
+};
 use rustls_pki_types::{pem::PemObject as _, CertificateDer};
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -19,18 +23,13 @@ pub use serde;
 pub use serde_json;
 
 pub type RequestBody = http_body_util::Full<hyper::body::Bytes>;
-pub type HttpsConnector =
-    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>;
-
-type HttpsClient<C> = hyper_util::client::legacy::Client<C, RequestBody>;
-
-// https://github.com/rustls/hyper-rustls/blob/main/examples/client.rs
+pub type HttpsConnector = hyper_rustls::HttpsConnector<HttpConnector>;
 
 #[derive(Clone, Debug)]
 pub struct LndRestClient<C> {
     macaroon_header: HeaderValue,
     address: String,
-    client: HttpsClient<C>,
+    client: HyperClient<C, RequestBody>,
 }
 
 impl<C> std::fmt::Display for LndRestClient<C> {
@@ -74,7 +73,7 @@ impl LndRestClient<HttpsConnector> {
 
 impl<C> LndRestClient<C>
 where
-    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + 'static,
+    C: Connect + Clone + Send + Sync + 'static,
 {
     pub fn new_with_connector(address: String, macaroon: &[u8], connector: C) -> Self {
         // TODO: allow non-tokio runtime?
