@@ -1,8 +1,10 @@
 pub mod base64;
 mod errors;
-pub use errors::*;
+mod stream;
 
-use http_body_util::BodyExt as _;
+pub use errors::*;
+pub use stream::*;
+
 use hyper::{header::HeaderValue, Method};
 use rustls_pki_types::{pem::PemObject as _, CertificateDer};
 use serde::{de::DeserializeOwned, Serialize};
@@ -35,31 +37,6 @@ impl<C> std::fmt::Display for LndRestClient<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "LndRestClient({})", self.address)
     }
-}
-
-async fn read_body_json<O: DeserializeOwned>(
-    body: &mut hyper::body::Incoming,
-) -> Result<O, BodyReadError> {
-    // TODO stream response body directly to a json parser without intermediate buffering
-    let mut buf = Vec::with_capacity(4096);
-    while let Some(frame) = body.frame().await {
-        match frame {
-            Err(e) => return Err(BodyReadError::HttpFailure(e)),
-            Ok(frame) => {
-                if let Some(chunk) = frame.data_ref() {
-                    // TODO declare constant
-                    if buf.len() + chunk.len() > 100 * 1024 * 1024 {
-                        return Err(BodyReadError::TooLarge);
-                    }
-                    buf.extend(chunk);
-
-                    // TODO: delimit by newlines here for subscription endpoints
-                }
-            }
-        }
-    }
-    let output: O = serde_json::from_slice(&buf)?;
-    Ok(output)
 }
 
 pub fn self_signed_https_connector(
@@ -139,8 +116,25 @@ where
     ) -> Result<O, RequestError> {
         let endpoint = request.uri().path().to_string();
         let method = request.method().clone();
+        let mut stream = self.process_request_streamed(request).await?;
 
-        let mut response = self
+        let value: O = stream.next().await?.ok_or_else(|| RequestError {
+            endpoint,
+            method,
+            cause: RequestErrorCause::BodyReadFailure(BodyReadError::EmptyResponse),
+        })?;
+
+        Ok(value)
+    }
+
+    pub async fn process_request_streamed(
+        &self,
+        request: hyper::Request<RequestBody>,
+    ) -> Result<ResponseStream, RequestError> {
+        let endpoint = request.uri().path().to_string();
+        let method = request.method().clone();
+
+        let response = self
             .client
             .request(request)
             .await
@@ -150,30 +144,34 @@ where
                 cause: RequestErrorCause::HttpFailure(e),
             })?;
 
-        if !response.status().is_success() {
+        let status = response.status();
+
+        let mut stream =
+            ResponseStream::new(method.clone(), endpoint.clone(), response.into_body());
+
+        if !status.is_success() {
             return Err(RequestError {
                 endpoint,
                 method,
                 cause: RequestErrorCause::BadStatusCode {
-                    status: response.status(),
-                    details: read_body_json(response.body_mut()).await.ok(),
+                    status,
+                    details: stream.next().await.ok().flatten(),
                 },
             });
         }
-
-        read_body_json(response.body_mut())
-            .await
-            .map_err(|e| RequestError {
-                endpoint,
-                method,
-                cause: RequestErrorCause::BodyReadFailure(e),
-            })
+        Ok(stream)
     }
 
     pub async fn get<O: DeserializeOwned>(&self, endpoint: &str) -> Result<O, RequestError> {
         let empty_body = RequestBody::new(hyper::body::Bytes::new());
         let req = self.new_request(Method::GET, endpoint, empty_body)?;
         self.process_request(req).await
+    }
+
+    pub async fn get_streamed(&self, endpoint: &str) -> Result<ResponseStream, RequestError> {
+        let empty_body = RequestBody::new(hyper::body::Bytes::new());
+        let req = self.new_request(Method::GET, endpoint, empty_body)?;
+        self.process_request_streamed(req).await
     }
 
     pub async fn post<B: Serialize, O: DeserializeOwned>(
