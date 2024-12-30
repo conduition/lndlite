@@ -6,8 +6,6 @@ use tempdir::TempDir;
 
 use std::{fs, io, net, process, thread, time::Duration};
 
-const LND_SPINUP_TIME: Duration = Duration::from_millis(100);
-
 pub struct LND<C> {
     #[allow(dead_code)]
     tempdir: TempDir,
@@ -20,6 +18,18 @@ pub struct LND<C> {
 
 fn get_unused_bind_address() -> io::Result<net::SocketAddr> {
     net::TcpListener::bind("127.0.0.1:0")?.local_addr()
+}
+
+fn wait_for_bind(addr: &net::SocketAddr) {
+    for i in 0..100 {
+        thread::sleep(Duration::from_millis(100));
+        if net::TcpStream::connect(addr).is_ok() {
+            return;
+        }
+        if i == 99 {
+            panic!("timed out waiting to connect to {addr}");
+        }
+    }
 }
 
 impl LND<HttpsConnector> {
@@ -37,8 +47,7 @@ impl LND<HttpsConnector> {
             .spawn()?;
 
         // Give the REST server time to spin up.
-        // TODO: detect automatically when "gRPC proxy started" is logged
-        thread::sleep(LND_SPINUP_TIME);
+        wait_for_bind(&addr);
 
         let tls_cert_pem = fs::read(tempdir.path().join("tls.cert")).unwrap_or_else(|e| {
             let _ = child.kill();
@@ -78,8 +87,7 @@ impl LND<HttpConnector> {
             .spawn()?;
 
         // Give the REST server time to spin up.
-        // TODO: detect automatically when "gRPC proxy started" is logged
-        thread::sleep(LND_SPINUP_TIME);
+        wait_for_bind(&addr);
 
         let connector = HttpConnector::new();
 
@@ -98,7 +106,7 @@ impl<C> LND<C>
 where
     C: Connect + Clone + Send + Sync + 'static,
 {
-    pub fn unauthed_client(&self) -> LndRestClient<C>
+    fn unauthed_client(&self) -> LndRestClient<C>
     where
         C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + 'static,
     {
@@ -117,27 +125,11 @@ impl<C> std::ops::Drop for LND<C> {
     }
 }
 
-#[tokio::test]
-async fn basic_lnd() {
-    let lnd = LND::<HttpsConnector>::run_regtest().expect("failed to run LND");
-    let client = lnd.unauthed_client();
-
-    #[derive(Deserialize)]
-    struct StateUpdate {
-        state: String,
-    }
-
-    let mut state_stream = client
-        .get_streamed("/v1/state/subscribe")
-        .await
-        .expect("failed to subscribe");
-    let init_state: StateUpdate = state_stream
-        .next()
-        .await
-        .expect("failed to get state update")
-        .expect("should receive initial state update");
-    assert_eq!(&init_state.state, "NON_EXISTING");
-
+// Initialize an LND instance.
+async fn init_wallet<C>(client: &mut LndRestClient<C>)
+where
+    C: Connect + Clone + Send + Sync + 'static,
+{
     const XPRIV: &'static str = concat!(
         "tprv8ZgxMBicQKsPdpgo44ctecZXcupSdNCZL5gmLS6FiUzrjqePmp7",
         "KSSdJcCJ2z2w7aAh1poJBEQcLXi82KzeSg2tBZRvwwUynFrux1NUSuBa",
@@ -167,6 +159,31 @@ async fn basic_lnd() {
         .expect("failed to initialize LND wallet");
 
     assert!(!macaroon.is_empty());
+    client.set_macaroon(&macaroon);
+}
+
+#[tokio::test]
+async fn basic_lnd() {
+    let lnd = LND::<HttpsConnector>::run_regtest().expect("failed to run LND");
+    let mut client = lnd.unauthed_client();
+
+    #[derive(Deserialize)]
+    struct StateUpdate {
+        state: String,
+    }
+
+    let mut state_stream = client
+        .get_streamed("/v1/state/subscribe")
+        .await
+        .expect("failed to subscribe");
+    let init_state: StateUpdate = state_stream
+        .next()
+        .await
+        .expect("failed to get state update")
+        .expect("should receive initial state update");
+    assert_eq!(&init_state.state, "NON_EXISTING");
+
+    init_wallet(&mut client).await;
 
     let update: StateUpdate = state_stream
         .next()
