@@ -22,6 +22,10 @@ pub use hyper_util::client::legacy::connect::{Connect, HttpConnector};
 pub type RequestBody = http_body_util::Full<hyper::body::Bytes>;
 pub type HttpsConnector = hyper_openssl::client::legacy::HttpsConnector<HttpConnector>;
 
+/// A simple alias trait
+pub trait Connector: Connect + Clone + Send + Sync + 'static {}
+impl<C> Connector for C where C: Connect + Clone + Send + Sync + 'static {}
+
 #[derive(Clone, Debug)]
 pub struct LndRestClient<C> {
     macaroon_header: HeaderValue,
@@ -74,10 +78,7 @@ impl LndRestClient<HttpsConnector> {
     }
 }
 
-impl<C> LndRestClient<C>
-where
-    C: Connect + Clone + Send + Sync + 'static,
-{
+impl<C: Connector> LndRestClient<C> {
     pub fn new_with_connector(address: String, macaroon: &[u8], connector: C) -> Self {
         // TODO: allow non-tokio runtime?
         let client = hyper_util::client::legacy::Builder::new(hyper_util::rt::TokioExecutor::new())

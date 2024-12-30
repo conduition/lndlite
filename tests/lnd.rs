@@ -1,6 +1,6 @@
-use hyper_util::client::legacy::connect::Connect;
-use lndlite::{base64::Base64, HttpConnector, HttpsConnector, LndRestClient};
+use lndlite::{base64::Base64, Connector, HttpConnector, HttpsConnector, LndRestClient};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use tempdir::TempDir;
 
@@ -22,13 +22,13 @@ fn get_unused_bind_address() -> io::Result<net::SocketAddr> {
 
 fn wait_for_bind(addr: &net::SocketAddr) {
     for i in 0..100 {
-        thread::sleep(Duration::from_millis(100));
         if net::TcpStream::connect(addr).is_ok() {
             return;
         }
         if i == 99 {
             panic!("timed out waiting to connect to {addr}");
         }
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -43,6 +43,7 @@ impl LND<HttpsConnector> {
             .arg(format!("--lnddir={}", tempdir.path().display()))
             .arg(format!("--restlisten={}", addr))
             .arg(format!("--rpclisten={}", get_unused_bind_address()?))
+            .arg("--nolisten")
             .stdout(process::Stdio::null())
             .spawn()?;
 
@@ -83,6 +84,7 @@ impl LND<HttpConnector> {
             .arg(format!("--restlisten={}", addr))
             .arg(format!("--rpclisten={}", get_unused_bind_address()?))
             .arg("--no-rest-tls")
+            .arg("--nolisten")
             .stdout(process::Stdio::null())
             .spawn()?;
 
@@ -102,10 +104,7 @@ impl LND<HttpConnector> {
     }
 }
 
-impl<C> LND<C>
-where
-    C: Connect + Clone + Send + Sync + 'static,
-{
+impl<C: Connector> LND<C> {
     fn unauthed_client(&self) -> LndRestClient<C>
     where
         C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + 'static,
@@ -126,10 +125,7 @@ impl<C> std::ops::Drop for LND<C> {
 }
 
 // Initialize an LND instance.
-async fn init_wallet<C>(client: &mut LndRestClient<C>)
-where
-    C: Connect + Clone + Send + Sync + 'static,
-{
+async fn init_wallet<C: Connector>(client: &mut LndRestClient<C>) {
     const XPRIV: &'static str = concat!(
         "tprv8ZgxMBicQKsPdpgo44ctecZXcupSdNCZL5gmLS6FiUzrjqePmp7",
         "KSSdJcCJ2z2w7aAh1poJBEQcLXi82KzeSg2tBZRvwwUynFrux1NUSuBa",
@@ -162,15 +158,33 @@ where
     client.set_macaroon(&macaroon);
 }
 
+#[derive(Deserialize)]
+struct StateUpdate {
+    state: String,
+}
+
+async fn wait_for_server_active_state<C: Connector>(client: &LndRestClient<C>) {
+    let mut state_stream = client
+        .get_streamed("/v1/state/subscribe")
+        .await
+        .expect("failed to subscribe");
+
+    tokio::time::timeout(Duration::from_secs(10), async move {
+        while let Some(update) = state_stream.next::<StateUpdate>().await.unwrap() {
+            if update.state == "SERVER_ACTIVE" {
+                return;
+            }
+        }
+        panic!("never received SERVER_ACTIVE state");
+    })
+    .await
+    .expect("timed out waiting for SERVER_ACTIVE state");
+}
+
 #[tokio::test]
-async fn basic_lnd() {
+async fn state_subscription() {
     let lnd = LND::<HttpsConnector>::run_regtest().expect("failed to run LND");
     let mut client = lnd.unauthed_client();
-
-    #[derive(Deserialize)]
-    struct StateUpdate {
-        state: String,
-    }
 
     let mut state_stream = client
         .get_streamed("/v1/state/subscribe")
@@ -205,4 +219,43 @@ async fn basic_lnd() {
         .expect("failed to get state update")
         .expect("should receive third state update");
     assert_eq!(&update.state, "SERVER_ACTIVE");
+}
+
+#[tokio::test]
+async fn add_invoice() {
+    let lnd = LND::<HttpsConnector>::run_regtest().expect("failed to run LND");
+    let mut client = lnd.unauthed_client();
+    init_wallet(&mut client).await;
+    wait_for_server_active_state(&client).await;
+
+    #[derive(Serialize)]
+    struct AddInvoiceRequest {
+        value: u64,
+        r_preimage: Base64<[u8; 32]>,
+    }
+    #[derive(Deserialize)]
+    struct AddInvoiceResponse {
+        r_hash: Base64<[u8; 32]>,
+        payment_request: String,
+    }
+
+    let preimage = [0x01u8; 32];
+
+    let AddInvoiceResponse {
+        r_hash: Base64(r_hash),
+        payment_request,
+    } = client
+        .post(
+            "/v1/invoices",
+            AddInvoiceRequest {
+                value: 10_000,
+                r_preimage: Base64(preimage),
+            },
+        )
+        .await
+        .expect("failed to add invoice");
+
+    let hashed_preimage: [u8; 32] = Sha256::digest(&preimage).into();
+    assert_eq!(r_hash, hashed_preimage);
+    assert!(!payment_request.is_empty());
 }
