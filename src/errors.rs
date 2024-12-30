@@ -3,15 +3,15 @@ use std::{error::Error, fmt};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct LndErrorResponse {
-    pub code: usize,
+    pub code: u32,
     pub message: String,
-    pub detail: Vec<String>,
+    pub details: Vec<String>,
 }
 
 impl fmt::Display for LndErrorResponse {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut msg = format!("{} (code {})", self.message, self.code);
-        for detail in self.detail.iter() {
+        for detail in self.details.iter() {
             msg = format!("{msg}; {detail}");
         }
         f.write_str(&msg)
@@ -20,14 +20,12 @@ impl fmt::Display for LndErrorResponse {
 
 #[derive(Debug)]
 pub enum InvalidCertificateError {
-    PemParseFailed(rustls_pki_types::pem::Error),
-    CertificateParseFailed(rustls::Error),
+    CertificateParseFailed(openssl::error::ErrorStack),
 }
 
 impl fmt::Display for InvalidCertificateError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let msg = match self {
-            Self::PemParseFailed(e) => format!("PEM parsing failed: {e}"),
             Self::CertificateParseFailed(e) => format!("certificate parsing failed: {e}"),
         };
         write!(f, "invalid TLS certificate: {}", msg)
@@ -36,13 +34,8 @@ impl fmt::Display for InvalidCertificateError {
 
 impl Error for InvalidCertificateError {}
 
-impl From<rustls_pki_types::pem::Error> for InvalidCertificateError {
-    fn from(e: rustls_pki_types::pem::Error) -> Self {
-        InvalidCertificateError::PemParseFailed(e)
-    }
-}
-impl From<rustls::Error> for InvalidCertificateError {
-    fn from(e: rustls::Error) -> Self {
+impl From<openssl::error::ErrorStack> for InvalidCertificateError {
+    fn from(e: openssl::error::ErrorStack) -> Self {
         InvalidCertificateError::CertificateParseFailed(e)
     }
 }

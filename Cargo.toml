@@ -10,14 +10,13 @@ repository = "https://github.com/conduition/lndlite"
 keywords = []
 
 [dependencies]
-base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
-hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
-http-body-util = { version = "0.1.2", default-features = false }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+http-body-util = { version = "0.1", default-features = false }
 hyper = { version = "1", default-features = false, features = ["client", "http1"] }
-hyper-rustls = { version = "0.27", default-features = false, features = ["http1"] }
+hyper-openssl = { version = "0.10", default-features = false, features = ["client-legacy"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1"] }
-rustls = { version = "0.23", default-features = false }
-rustls-pki-types = { version = "1", default-features = false }
+openssl = { version = "0.10", default-features = false }
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 utf8-read = { version = "0.4", default-features = false }

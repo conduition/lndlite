@@ -6,54 +6,57 @@ pub use errors::*;
 pub use stream::*;
 
 use hyper::{header::HeaderValue, Method};
-use hyper_util::client::legacy::{
-    connect::{Connect, HttpConnector},
-    Client as HyperClient,
-};
-use rustls_pki_types::{pem::PemObject as _, CertificateDer};
+use hyper_util::client::legacy::Client as HyperClient;
 use serde::{de::DeserializeOwned, Serialize};
 
 // Re-exports
 pub use hyper;
-pub use hyper_rustls;
+pub use hyper_openssl;
 pub use hyper_util;
-pub use rustls;
-pub use rustls_pki_types;
+pub use openssl;
 pub use serde;
 pub use serde_json;
 
+// type alias/re-export
+pub use hyper_util::client::legacy::connect::{Connect, HttpConnector};
 pub type RequestBody = http_body_util::Full<hyper::body::Bytes>;
-pub type HttpsConnector = hyper_rustls::HttpsConnector<HttpConnector>;
+pub type HttpsConnector = hyper_openssl::client::legacy::HttpsConnector<HttpConnector>;
 
 #[derive(Clone, Debug)]
 pub struct LndRestClient<C> {
     macaroon_header: HeaderValue,
     address: String,
     client: HyperClient<C, RequestBody>,
+    scheme: &'static str,
 }
 
 impl<C> std::fmt::Display for LndRestClient<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "LndRestClient({})", self.address)
+        write!(f, "LndRestClient({}://{})", self.scheme, self.address)
     }
 }
 
 pub fn self_signed_https_connector(
     tls_cert_pem: &[u8],
 ) -> Result<HttpsConnector, InvalidCertificateError> {
-    let mut root_store = rustls::RootCertStore::empty();
-    let root_cert_der = CertificateDer::from_pem_slice(tls_cert_pem)?;
-    root_store.add(root_cert_der)?;
+    use openssl::{
+        ssl::{SslConnector, SslMethod},
+        x509::{store::X509StoreBuilder, X509},
+    };
 
-    let https = HttpsConnector::builder()
-        .with_tls_config(
-            rustls::ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth(),
-        )
-        .https_only()
-        .enable_http1()
-        .build();
+    let root_store = {
+        let mut builder = X509StoreBuilder::new()?;
+        builder.add_cert(X509::from_pem(tls_cert_pem)?)?;
+        builder.build()
+    };
+
+    let mut ssl_builder = SslConnector::builder(SslMethod::tls_client())?;
+    ssl_builder.set_cert_store(root_store);
+
+    let mut http = HttpConnector::new();
+    http.enforce_http(false);
+
+    let https = HttpsConnector::with_connector(http, ssl_builder)?;
     Ok(https)
 }
 
@@ -86,7 +89,16 @@ where
             macaroon_header,
             address,
             client,
+            scheme: "https",
         }
+    }
+
+    pub fn unsafe_use_plaintext_http_scheme(&mut self) {
+        self.scheme = "http";
+    }
+
+    pub fn set_macaroon(&mut self, macaroon: &[u8]) {
+        self.macaroon_header = HeaderValue::from_str(&hex::encode(macaroon)).unwrap();
     }
 
     pub fn new_request(
@@ -97,7 +109,7 @@ where
     ) -> Result<hyper::Request<RequestBody>, RequestError> {
         hyper::Request::builder()
             .method(method.clone())
-            .uri(format!("https://{}{}", self.address, endpoint))
+            .uri(format!("{}://{}{}", self.scheme, self.address, endpoint))
             .header("Grpc-Metadata-Macaroon", &self.macaroon_header)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
@@ -149,13 +161,11 @@ where
             ResponseStream::new(method.clone(), endpoint.clone(), response.into_body());
 
         if !status.is_success() {
+            let details: Option<LndErrorResponse> = stream.next().await?;
             return Err(RequestError {
                 endpoint,
                 method,
-                cause: RequestErrorCause::BadStatusCode {
-                    status,
-                    details: stream.next().await.ok().flatten(),
-                },
+                cause: RequestErrorCause::BadStatusCode { status, details },
             });
         }
         Ok(stream)
