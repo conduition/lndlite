@@ -26,6 +26,21 @@ pub fn decode_urlsafe<T: From<Vec<u8>>>(s: impl AsRef<str>) -> Result<T, DecodeE
 #[derive(Clone, Copy, Debug, Hash, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Base64<T>(pub T);
 
+impl<T: AsRef<[u8]>> AsRef<[u8]> for Base64<T> {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl<T: AsRef<[u8]>> Base64<T> {
+    pub fn encode_standard(&self) -> String {
+        BASE64_STANDARD.encode(self.0.as_ref())
+    }
+    pub fn encode_url(&self) -> String {
+        BASE64_URL_SAFE.encode(self.0.as_ref())
+    }
+}
+
 impl<T: AsRef<[u8]>> Serialize for Base64<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
