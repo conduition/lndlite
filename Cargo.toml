@@ -22,5 +22,6 @@ serde_json = { version = "1", default-features = false, features = ["alloc"] }
 utf8-read = { version = "0.4", default-features = false }
 
 [dev-dependencies]
-rand = "0.8.5"
+rand = "0.4"
+tempdir = "0.3.7"
 tokio = { version = "1.42.0", features = ["macros", "rt", "test-util"] }
