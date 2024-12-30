@@ -21,6 +21,14 @@ enum DrainResult {
     NoNewline(usize),
 }
 
+/// LND wraps all event objects from subscription streams in a `{ "result": <data> }`
+/// wrapper object. This doesn't seem to be documented in
+/// [the official API reference](https://lightning.engineering/api-docs/api/lnd/).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StreamEvent<T> {
+    result: T,
+}
+
 fn try_drain_newline_delim(
     buf: &mut Vec<u8>,
     search_pos: usize,
@@ -72,8 +80,8 @@ where
 
         match try_drain_newline_delim(&mut self.buf, 0)? {
             DrainResult::Drained(front) => {
-                let output: O = serde_json::from_slice(&front)?;
-                return Ok(Some(output));
+                let StreamEvent { result } = serde_json::from_slice(&front)?;
+                return Ok(Some(result));
             }
             DrainResult::NoNewline(invalid_bytes) => {
                 trailing_invalid_bytes = invalid_bytes;
@@ -99,8 +107,8 @@ where
                     // parse response objects delimited by newlines
                     match try_drain_newline_delim(&mut self.buf, search_pos)? {
                         DrainResult::Drained(front) => {
-                            let output: O = serde_json::from_slice(&front)?;
-                            return Ok(Some(output));
+                            let StreamEvent { result } = serde_json::from_slice(&front)?;
+                            return Ok(Some(result));
                         }
                         DrainResult::NoNewline(invalid_bytes) => {
                             trailing_invalid_bytes = invalid_bytes;
@@ -202,7 +210,11 @@ mod tests {
 
     #[tokio::test]
     async fn response_stream_detects_newlines() {
-        let mut stream = ResponseStreamInner::new(MockBody::new(&["24\n", "\"hi there\"\n", "72"]));
+        let mut stream = ResponseStreamInner::new(MockBody::new(&[
+            "{\"result\":24}\n",
+            "{\"result\": \"hi there\"}\n",
+            "{\"result\": 72}\n",
+        ]));
         assert_eq!(stream.next::<u32>().await.unwrap(), Some(24));
         assert_eq!(
             stream.next::<String>().await.unwrap(),
@@ -235,10 +247,14 @@ mod tests {
     #[tokio::test]
     async fn response_stream_handles_utf8_and_newlines() {
         let emoji_string = format!("{}{}", EMOJI_SMILE, EMOJI_SMILE);
-        let emoji_json_string = serde_json::to_string(&emoji_string).unwrap();
+        let emoji_event = StreamEvent {
+            result: emoji_string.clone(),
+        };
+        let emoji_event_json = serde_json::to_string(&emoji_event).unwrap();
+
         let emoji_json_strings_delimited = format!(
-            "{}\n{}\n{}",
-            emoji_json_string, emoji_json_string, emoji_json_string
+            "{}\n{}\n{}\n",
+            emoji_event_json, emoji_event_json, emoji_event_json
         );
         let emoji_json_strings_bytes = emoji_json_strings_delimited.as_bytes();
 
@@ -278,17 +294,20 @@ mod tests {
 
     #[tokio::test]
     async fn response_stream_handles_newlines_inside_strings() {
-        let mut json_string = serde_json::to_string("hello\nthere").unwrap();
+        let mut json_string = serde_json::to_string(&StreamEvent {
+            result: "hello\nthere",
+        })
+        .unwrap();
         json_string.push('\n');
 
-        let mut stream = ResponseStreamInner::new(MockBody::new(&["24\n", &json_string, "72"]));
+        let mut stream =
+            ResponseStreamInner::new(MockBody::new(&["{\"result\": 24}\n", &json_string]));
 
         assert_eq!(stream.next::<u32>().await.unwrap(), Some(24));
         assert_eq!(
             stream.next::<String>().await.unwrap(),
             Some(String::from("hello\nthere"))
         );
-        assert_eq!(stream.next::<u32>().await.unwrap(), Some(72));
 
         // Stream now empty
         assert!(matches!(stream.next::<u32>().await, Ok(None)));

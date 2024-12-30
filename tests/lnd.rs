@@ -123,12 +123,8 @@ async fn basic_lnd() {
     let client = lnd.unauthed_client();
 
     #[derive(Deserialize)]
-    struct StateUpdateResult {
-        state: String,
-    }
-    #[derive(Deserialize)]
     struct StateUpdate {
-        result: StateUpdateResult,
+        state: String,
     }
 
     let mut state_stream = client
@@ -140,7 +136,7 @@ async fn basic_lnd() {
         .await
         .expect("failed to get state update")
         .expect("should receive initial state update");
-    assert_eq!(&init_state.result.state, "NON_EXISTING");
+    assert_eq!(&init_state.state, "NON_EXISTING");
 
     const XPRIV: &'static str = concat!(
         "tprv8ZgxMBicQKsPdpgo44ctecZXcupSdNCZL5gmLS6FiUzrjqePmp7",
@@ -177,19 +173,19 @@ async fn basic_lnd() {
         .await
         .expect("failed to get state update")
         .expect("should receive second state update");
-    assert_eq!(&update.result.state, "UNLOCKED");
+    assert_eq!(&update.state, "UNLOCKED");
 
     let update: StateUpdate = state_stream
         .next()
         .await
         .expect("failed to get state update")
         .expect("should receive third state update");
-    assert_eq!(&update.result.state, "RPC_ACTIVE");
+    assert_eq!(&update.state, "RPC_ACTIVE");
 
     let update: StateUpdate = state_stream
         .next()
         .await
         .expect("failed to get state update")
         .expect("should receive third state update");
-    assert_eq!(&update.result.state, "SERVER_ACTIVE");
+    assert_eq!(&update.state, "SERVER_ACTIVE");
 }
