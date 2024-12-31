@@ -7,7 +7,7 @@ description = "Access the Lightning Network Daemon (LND) REST API using hyper."
 readme = "README.md"
 license = "Unlicense"
 repository = "https://github.com/conduition/lndlite"
-keywords = []
+keywords = ["lnd", "rest", "api", "lightning", "bitcoin"]
 
 [dependencies]
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
