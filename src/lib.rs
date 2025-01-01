@@ -1,3 +1,4 @@
+#[cfg(feature = "base64")]
 pub mod base64;
 mod errors;
 mod stream;

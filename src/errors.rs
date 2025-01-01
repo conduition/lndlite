@@ -1,33 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt};
 
-#[derive(Debug, Clone)]
-pub enum DecodeError {
-    Base64(base64::DecodeError),
-    InvalidBytes,
-}
-
-impl fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "decode error: {}",
-            match self {
-                DecodeError::Base64(e) => format!("base64: {e}"),
-                DecodeError::InvalidBytes => format!("invalid bytes"),
-            }
-        )
-    }
-}
-
-impl From<base64::DecodeError> for DecodeError {
-    fn from(e: base64::DecodeError) -> Self {
-        DecodeError::Base64(e)
-    }
-}
-
-impl Error for DecodeError {}
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Deserialize, Serialize)]
 pub struct LndErrorResponse {
     pub code: u32,

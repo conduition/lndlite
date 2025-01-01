@@ -1,10 +1,36 @@
 //! Base64 encoding utilities, provided because LND requires Base64 encoding
 //! for bytes-like types in the REST API.
-use crate::DecodeError;
 use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE as BASE64_URL_SAFE};
 use base64::engine::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::{fmt, marker::PhantomData};
+
+#[derive(Debug, Clone)]
+pub enum DecodeError {
+    Base64(base64::DecodeError),
+    InvalidBytes,
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "decode error: {}",
+            match self {
+                DecodeError::Base64(e) => format!("base64: {e}"),
+                DecodeError::InvalidBytes => format!("invalid bytes"),
+            }
+        )
+    }
+}
+
+impl From<base64::DecodeError> for DecodeError {
+    fn from(e: base64::DecodeError) -> Self {
+        DecodeError::Base64(e)
+    }
+}
+
+impl std::error::Error for DecodeError {}
 
 pub fn encode_standard(data: impl AsRef<[u8]>) -> String {
     BASE64_STANDARD.encode(data)
