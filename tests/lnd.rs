@@ -1,20 +1,19 @@
+use http_body_util::Full;
+use hyper::body::Bytes;
+use hyper_util::client::legacy::Client as HyperClient;
 use lndlite::{base64::Base64, Connector, HttpConnector, HttpsConnector, LndRestClient};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
 use tempdir::TempDir;
 
-use std::{fs, io, net, process, thread, time::Duration};
+use std::{error::Error, fs, io, net, process, thread, time::Duration};
 
-pub struct LND<C> {
-    #[allow(dead_code)]
-    tempdir: TempDir,
-    #[allow(dead_code)]
-    child: process::Child,
-    addr: net::SocketAddr,
-    proto: &'static str,
-    connector: C,
-}
+const BITCOIND_RPC_USERNAME: &str = "regtest";
+const BITCOIND_RPC_PASSWORD: &str = "regtest";
+
+const ARBITRARY_REGTEST_ADDRESS: &str = "bcrt1q7nf2d70la3ys27ckf8lgeg67fk4e3dfejuag2y";
 
 fn get_unused_bind_address() -> io::Result<net::SocketAddr> {
     net::TcpListener::bind("127.0.0.1:0")?.local_addr()
@@ -32,23 +31,205 @@ fn wait_for_bind(addr: &net::SocketAddr) {
     }
 }
 
+/// This represents a handle to temporary resources which should be
+/// cleaned up when the test ends.
+#[derive(Debug)]
+struct Bitcoind {
+    #[allow(dead_code)]
+    tempdir: TempDir,
+    child: process::Child,
+    rpc_addr: net::SocketAddr,
+    zmq_block_addr: net::SocketAddr,
+    zmq_tx_addr: net::SocketAddr,
+    client: HyperClient<HttpConnector, Full<Bytes>>,
+}
+
+impl Bitcoind {
+    pub fn run_regtest() -> io::Result<Bitcoind> {
+        let dir = TempDir::new("lndlite").expect("error making tempdir");
+        let rpc_addr = get_unused_bind_address()?;
+        let zmq_block_addr = get_unused_bind_address()?;
+        let zmq_tx_addr = get_unused_bind_address()?;
+
+        let child: process::Child = process::Command::new("bitcoind")
+            .arg("-chain=regtest")
+            .arg("-server=1")
+            .arg("-txindex=1")
+            .arg("-listen=0")
+            .arg(format!("-rpcport={}", rpc_addr.port()))
+            .arg(format!("-rpcuser={}", BITCOIND_RPC_USERNAME))
+            .arg(format!("-rpcpassword={}", BITCOIND_RPC_PASSWORD))
+            .arg(format!("-zmqpubrawblock=tcp://{}", zmq_block_addr))
+            .arg(format!("-zmqpubrawtx=tcp://{}", zmq_tx_addr))
+            .arg(format!("-datadir={}", dir.path().display()))
+            .stdout(process::Stdio::null())
+            // .stdout(process::Stdio::inherit())
+            .spawn()?;
+
+        wait_for_bind(&rpc_addr);
+
+        let hyper_client =
+            HyperClient::builder(hyper_util::rt::TokioExecutor::new()).build(HttpConnector::new());
+
+        let bitcoind = Bitcoind {
+            tempdir: dir,
+            child,
+            rpc_addr,
+            zmq_block_addr,
+            zmq_tx_addr,
+            client: hyper_client,
+        };
+
+        Ok(bitcoind)
+    }
+
+    pub async fn generate_to_address(
+        &self,
+        n_blocks: u16,
+        btc_address: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        #[derive(Deserialize)]
+        struct JsonRpcError {
+            code: i32,
+            message: String,
+        }
+
+        #[derive(Deserialize)]
+        struct JsonRpcResponse {
+            error: Option<JsonRpcError>,
+        }
+
+        let req_body = Bytes::from(serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "generatetoaddress",
+            "params": [n_blocks, btc_address],
+        }))?);
+
+        let auth_header = format!(
+            "Basic {}",
+            lndlite::base64::encode_standard(format!(
+                "{}:{}",
+                BITCOIND_RPC_USERNAME, BITCOIND_RPC_PASSWORD
+            ))
+        );
+
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri(format!("http://{}", self.rpc_addr))
+            .header("Authorization", auth_header)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .body(Full::new(req_body))?;
+
+        loop {
+            let response = self.client.request(req.clone()).await?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "unexpected bitcoin RPC response status {}",
+                    response.status()
+                )
+                .as_str())?;
+            }
+
+            let body: JsonRpcResponse = serde_json::from_slice(
+                &http_body_util::BodyExt::collect(response.into_body())
+                    .await?
+                    .to_bytes(),
+            )?;
+
+            match body.error {
+                Some(err) => {
+                    // "Loading block index", retry after delay
+                    if err.code == -28 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    return Err(
+                        format!("JSON-RPC error: {} (code {})", err.message, err.code).as_str(),
+                    )?;
+                }
+
+                // Success
+                None => {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+impl std::ops::Drop for Bitcoind {
+    fn drop(&mut self) {
+        self.child
+            .kill()
+            .expect("failed to kill bitcoind child process");
+    }
+}
+
+#[tokio::test]
+async fn bitcoind_runs_and_mines() {
+    Bitcoind::run_regtest()
+        .unwrap()
+        .generate_to_address(101, ARBITRARY_REGTEST_ADDRESS)
+        .await
+        .unwrap();
+}
+
+pub struct LND<C> {
+    #[allow(dead_code)]
+    tempdir: TempDir,
+    bitcoind: Bitcoind,
+    child: process::Child,
+    rest_addr: net::SocketAddr,
+    p2p_addr: net::SocketAddr,
+    proto: &'static str,
+    connector: C,
+}
+
+fn new_lnd_cmd(
+    bitcoind: &Bitcoind,
+    tempdir: &TempDir,
+    rest_addr: &net::SocketAddr,
+    p2p_addr: &net::SocketAddr,
+) -> io::Result<process::Command> {
+    let mut cmd = process::Command::new("lnd");
+    cmd.arg("--bitcoin.regtest")
+        .arg("--bitcoin.node=bitcoind")
+        .arg(format!("--bitcoind.rpchost={}", bitcoind.rpc_addr))
+        .arg(format!("--bitcoind.rpcuser={}", BITCOIND_RPC_USERNAME))
+        .arg(format!("--bitcoind.rpcpass={}", BITCOIND_RPC_PASSWORD))
+        .arg(format!(
+            "--bitcoind.zmqpubrawblock=tcp://{}",
+            bitcoind.zmq_block_addr
+        ))
+        .arg(format!(
+            "--bitcoind.zmqpubrawtx=tcp://{}",
+            bitcoind.zmq_tx_addr
+        ))
+        .arg(format!("--lnddir={}", tempdir.path().display()))
+        .arg(format!("--restlisten={}", rest_addr))
+        .arg(format!("--rpclisten={}", get_unused_bind_address()?))
+        .arg(format!("--listen={}", p2p_addr))
+        // .stdout(process::Stdio::inherit());
+        .stdout(process::Stdio::null());
+
+    Ok(cmd)
+}
+
 impl LND<HttpsConnector> {
     pub fn run_regtest() -> io::Result<Self> {
         let tempdir = TempDir::new("lndlite").expect("error making tempdir");
-        let addr = get_unused_bind_address()?;
+        let rest_addr = get_unused_bind_address()?;
+        let p2p_addr = get_unused_bind_address()?;
 
-        let mut child: process::Child = process::Command::new("lnd")
-            .arg("--bitcoin.regtest")
-            .arg("--bitcoin.node=nochainbackend")
-            .arg(format!("--lnddir={}", tempdir.path().display()))
-            .arg(format!("--restlisten={}", addr))
-            .arg(format!("--rpclisten={}", get_unused_bind_address()?))
-            .arg("--nolisten")
-            .stdout(process::Stdio::null())
-            .spawn()?;
+        let bitcoind = Bitcoind::run_regtest()?;
+
+        let mut child: process::Child =
+            new_lnd_cmd(&bitcoind, &tempdir, &rest_addr, &p2p_addr)?.spawn()?;
 
         // Give the REST server time to spin up.
-        wait_for_bind(&addr);
+        wait_for_bind(&rest_addr);
 
         let tls_cert_pem = fs::read(tempdir.path().join("tls.cert")).unwrap_or_else(|e| {
             let _ = child.kill();
@@ -62,8 +243,10 @@ impl LND<HttpsConnector> {
 
         let lnd = LND {
             tempdir,
+            bitcoind,
             child,
-            addr,
+            rest_addr,
+            p2p_addr,
             proto: "https",
             connector,
         };
@@ -75,28 +258,26 @@ impl LND<HttpsConnector> {
 impl LND<HttpConnector> {
     pub fn run_regtest() -> io::Result<Self> {
         let tempdir = TempDir::new("lndlite").expect("error making tempdir");
-        let addr = get_unused_bind_address()?;
+        let rest_addr = get_unused_bind_address()?;
+        let p2p_addr = get_unused_bind_address()?;
 
-        let child: process::Child = process::Command::new("lnd")
-            .arg("--bitcoin.regtest")
-            .arg("--bitcoin.node=nochainbackend")
-            .arg(format!("--lnddir={}", tempdir.path().display()))
-            .arg(format!("--restlisten={}", addr))
-            .arg(format!("--rpclisten={}", get_unused_bind_address()?))
+        let bitcoind = Bitcoind::run_regtest()?;
+
+        let child: process::Child = new_lnd_cmd(&bitcoind, &tempdir, &rest_addr, &p2p_addr)?
             .arg("--no-rest-tls")
-            .arg("--nolisten")
-            .stdout(process::Stdio::null())
             .spawn()?;
 
         // Give the REST server time to spin up.
-        wait_for_bind(&addr);
+        wait_for_bind(&rest_addr);
 
         let connector = HttpConnector::new();
 
         let lnd = LND {
             tempdir,
+            bitcoind,
             child,
-            addr,
+            rest_addr,
+            p2p_addr,
             proto: "http",
             connector,
         };
@@ -109,8 +290,11 @@ impl<C: Connector> LND<C> {
     where
         C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + 'static,
     {
-        let mut client =
-            LndRestClient::new_with_connector(self.addr.to_string(), &[], self.connector.clone());
+        let mut client = LndRestClient::new_with_connector(
+            self.rest_addr.to_string(),
+            &[],
+            self.connector.clone(),
+        );
         if self.proto == "http" {
             client.unsafe_use_plaintext_http_scheme();
         }
@@ -163,7 +347,16 @@ struct StateUpdate {
     state: String,
 }
 
-async fn wait_for_server_active_state<C: Connector>(client: &LndRestClient<C>) {
+#[derive(Deserialize)]
+struct GetInfoResponse {
+    version: String,
+    identity_pubkey: String,
+    num_peers: usize,
+    num_active_channels: usize,
+    num_pending_channels: usize,
+}
+
+async fn wait_for_lnd_state<C: Connector>(client: &LndRestClient<C>, desired_state: &str) {
     let mut state_stream = client
         .get_streamed("/v1/state/subscribe")
         .await
@@ -171,14 +364,61 @@ async fn wait_for_server_active_state<C: Connector>(client: &LndRestClient<C>) {
 
     tokio::time::timeout(Duration::from_secs(10), async move {
         while let Some(update) = state_stream.next::<StateUpdate>().await.unwrap() {
-            if update.state == "SERVER_ACTIVE" {
+            if update.state == desired_state {
                 return;
             }
         }
-        panic!("never received SERVER_ACTIVE state");
+        panic!("never received {desired_state} state");
     })
     .await
-    .expect("timed out waiting for SERVER_ACTIVE state");
+    .expect(&format!("timed out waiting for {desired_state} state"));
+}
+
+async fn init_wallet_and_wait<C: Connector>(client: &mut LndRestClient<C>, bitcoind: &Bitcoind) {
+    wait_for_lnd_state(client, "NON_EXISTING").await;
+    init_wallet(client).await;
+
+    // LND will wait forever for the regtest node to "sync" unless it has
+    // at least one mined block.
+    // https://github.com/lightningnetwork/lnd/blob/a388c1f39d849005b58eae81516b4104929101a6/lnd.go#L702
+    bitcoind
+        .generate_to_address(1, ARBITRARY_REGTEST_ADDRESS)
+        .await
+        .expect("failed to mine first block");
+
+    wait_for_lnd_state(client, "SERVER_ACTIVE").await;
+}
+
+#[tokio::test]
+async fn lnd_https_rest() {
+    let lnd = LND::<HttpsConnector>::run_regtest().expect("failed to run LND");
+    let mut client = lnd.unauthed_client();
+    init_wallet_and_wait(&mut client, &lnd.bitcoind).await;
+
+    let info: GetInfoResponse = client
+        .get("/v1/getinfo")
+        .await
+        .expect("failed to get node info");
+
+    assert_eq!(info.num_peers, 0);
+    assert_eq!(info.num_active_channels, 0);
+    assert_eq!(info.num_pending_channels, 0);
+}
+
+#[tokio::test]
+async fn lnd_http_rest() {
+    let lnd = LND::<HttpConnector>::run_regtest().expect("failed to run LND");
+    let mut client = lnd.unauthed_client();
+    init_wallet_and_wait(&mut client, &lnd.bitcoind).await;
+
+    let info: GetInfoResponse = client
+        .get("/v1/getinfo")
+        .await
+        .expect("failed to get node info");
+
+    assert_eq!(info.num_peers, 0);
+    assert_eq!(info.num_active_channels, 0);
+    assert_eq!(info.num_pending_channels, 0);
 }
 
 #[tokio::test]
@@ -213,6 +453,11 @@ async fn state_subscription() {
         .expect("should receive third state update");
     assert_eq!(&update.state, "RPC_ACTIVE");
 
+    lnd.bitcoind
+        .generate_to_address(1, ARBITRARY_REGTEST_ADDRESS)
+        .await
+        .unwrap();
+
     let update: StateUpdate = state_stream
         .next()
         .await
@@ -225,8 +470,7 @@ async fn state_subscription() {
 async fn add_invoice() {
     let lnd = LND::<HttpsConnector>::run_regtest().expect("failed to run LND");
     let mut client = lnd.unauthed_client();
-    init_wallet(&mut client).await;
-    wait_for_server_active_state(&client).await;
+    init_wallet_and_wait(&mut client, &lnd.bitcoind).await;
 
     #[derive(Serialize)]
     struct AddInvoiceRequest {
