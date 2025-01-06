@@ -25,10 +25,11 @@ Run LND in regtest mode with no backend (just for example).
 lnd --bitcoin.regtest --bitcoin.node=nochainbackend --lnddir=/tmp/test --restlisten=127.0.0.1:8555
 ```
 
-Now you can install and use `lndlite` in your crate. You'll need an async runtime like [`tokio`](https://tokio.rs).
+Now you can install and use `lndlite` in your crate. You'll need an async runtime like [`tokio`](https://tokio.rs). Here is an example program which uses `lndlite` (also in [`examples/simple.rs`](./examples/simple.rs)).
 
 ```rust
 use lndlite::{base64::Base64, serde, LndRestClient};
+use sha2::{Digest as _, Sha256};
 
 #[derive(serde::Serialize)]
 struct InitWalletRequest {
@@ -44,6 +45,18 @@ struct InitWalletResponse {
 #[derive(serde::Deserialize)]
 struct StateUpdate {
     state: String,
+}
+
+#[derive(serde::Serialize)]
+struct AddInvoiceRequest {
+    value: u64,
+    r_preimage: Base64<[u8; 32]>,
+}
+
+#[derive(serde::Deserialize)]
+struct AddInvoiceResponse {
+    r_hash: Base64<[u8; 32]>,
+    payment_request: String,
 }
 
 /// could use a cipherseed mnemonic instead
@@ -89,28 +102,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("LND API server is fully active and ready for use");
 
+    let preimage = [0x01u8; 32];
+
+    let AddInvoiceResponse {
+        r_hash: Base64(r_hash),
+        payment_request,
+    } = lnd_client
+        .post(
+            "/v1/invoices",
+            AddInvoiceRequest {
+                value: 10_000,
+                r_preimage: Base64(preimage),
+            },
+        )
+        .await?;
+
+    let hashed_preimage: [u8; 32] = Sha256::digest(&preimage).into();
+    assert_eq!(r_hash, hashed_preimage);
+    println!("generated BOLT11 invoice: {}", payment_request);
+
     Ok(())
 }
 ```
 
 ```
-$ cargo r
-   Compiling t v0.1.0
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.67s
-     Running `target/debug/t`
-wallet unlocked, macaroon: [2, 1, 3, 108, 110, 100, 2, 248, 1, 3, 10, 16, 179, 33, 245, 229, 123, 80, 96, 142, 187, 213, 10, 155, 147, 135, 145, 116, 18, 1, 48, 26, 22, 10, 7, 97, 100, 100, 114, 101, 115, 115, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 19, 10, 4, 105, 110, 102, 111, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 23, 10, 8, 105, 110, 118, 111, 105, 99, 101, 115, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 33, 10, 8, 109, 97, 99, 97, 114, 111, 111, 110, 18, 8, 103, 101, 110, 101, 114, 97, 116, 101, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 22, 10, 7, 109, 101, 115, 115, 97, 103, 101, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 23, 10, 8, 111, 102, 102, 99, 104, 97, 105, 110, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 22, 10, 7, 111, 110, 99, 104, 97, 105, 110, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 20, 10, 5, 112, 101, 101, 114, 115, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 24, 10, 6, 115, 105, 103, 110, 101, 114, 18, 8, 103, 101, 110, 101, 114, 97, 116, 101, 18, 4, 114, 101, 97, 100, 0, 0, 6, 32, 136, 209, 55, 67, 71, 124, 50, 178, 171, 43, 94, 248, 16, 32, 60, 92, 126, 37, 22, 248, 116, 37, 112, 223, 18, 162, 175, 22, 120, 90, 146, 207]
+$ cargo run --example simple
+   Compiling lndlite v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.21s
+     Running `target/debug/examples/simple`
+wallet unlocked, macaroon: [2, 1, 3, 108, 110, 100, 2, 248, 1, 3, 10, 16, 249, 30, 150, 172, 176, 209, 254, 188, 250, 170, 230, 46, 193, 235, 59, 4, 18, 1, 48, 26, 22, 10, 7, 97, 100, 100, 114, 101, 115, 115, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 19, 10, 4, 105, 110, 102, 111, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 23, 10, 8, 105, 110, 118, 111, 105, 99, 101, 115, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 33, 10, 8, 109, 97, 99, 97, 114, 111, 111, 110, 18, 8, 103, 101, 110, 101, 114, 97, 116, 101, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 22, 10, 7, 109, 101, 115, 115, 97, 103, 101, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 23, 10, 8, 111, 102, 102, 99, 104, 97, 105, 110, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 22, 10, 7, 111, 110, 99, 104, 97, 105, 110, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 20, 10, 5, 112, 101, 101, 114, 115, 18, 4, 114, 101, 97, 100, 18, 5, 119, 114, 105, 116, 101, 26, 24, 10, 6, 115, 105, 103, 110, 101, 114, 18, 8, 103, 101, 110, 101, 114, 97, 116, 101, 18, 4, 114, 101, 97, 100, 0, 0, 6, 32, 213, 90, 160, 144, 226, 203, 1, 45, 247, 66, 85, 163, 243, 169, 44, 65, 44, 64, 240, 83, 71, 239, 236, 214, 187, 155, 244, 64, 63, 17, 198, 231]
 LND is in state: NON_EXISTING
 LND is in state: UNLOCKED
 LND is in state: RPC_ACTIVE
 LND is in state: SERVER_ACTIVE
 LND API server is fully active and ready for use
+generated BOLT11 invoice: lnbcrt100u1pnhkt4spp5wtxkappzcsrlkmgfs6g0zyct0hkhashh7hsaxz7e65slq9fkx7fsdqqcqzzsxqyz5vqsp5r5l0cs58vwaslfxx9che9kjm3udgpjsws9267t7mmj9jh4fy07gq9qxpqysgqxkelqfmpclv2uvfa34wh6rxdu08d9zhd73u3wvges2f238qy7w49wrmgymcdffj4z7hr8jy4qk6zn0evdlp95w4xwdwtlvsmnjcdc9gp22auz6
 ```
 
 ## Where are all the types/methods?
 
-This crate is a thin wrapper to encourage correct async usage of the LND REST API with minimal dependencies. Unlike other LND API wrappers, this crate intentionally does not declare or maintain Rust methods and typedefs for the numerous endpoints and data structures available on the [LND API](https://lightning.engineering/api-docs/api/lnd/).
+This crate is a **thin** wrapper to encourage correct async usage of the LND REST API with minimal dependencies. Unlike other LND API wrappers, this crate intentionally does not declare or maintain Rust methods and typedefs for the numerous endpoints and data structures available on the [LND API](https://lightning.engineering/api-docs/api/lnd/).
 
-This crate also does not pull in any cryptographic primitives or Bitcoin protocol code: It is solely an HTTPS API wrapper. We bundle only `hyper` for HTTP, `openssl` for TLS, and basic encoding/decoding utilities for UTF8 JSON, such as `serde_json` and `utf8-read` to handle newline-delimited JSON streams.
+This crate does not pull in any cryptographic primitives or Bitcoin protocol code: It is solely an HTTP(S) API wrapper. We bundle only `hyper` for HTTP, `openssl` for TLS, and basic encoding/decoding utilities for UTF8 JSON, such as `serde_json` and `utf8-read` to handle newline-delimited JSON streams.
 
 Users of this crate must declare their own types and then invoke REST API endpoints properly by referencing [the current documentation](https://lightning.engineering/api-docs/api/lnd/rest-endpoints/). This crate is simply a robust REST interface through which one can interact with a running LND server.
 
