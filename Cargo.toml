@@ -14,9 +14,9 @@ base64 = { version = "0.22", default-features = false, optional = true, features
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 http-body-util = { version = "0.1", default-features = false }
 hyper = { version = "1", default-features = false, features = ["client", "http1"] }
-hyper-openssl = { version = "0.10", default-features = false, features = ["client-legacy"] }
+hyper-openssl = { version = "0.10", optional = true, default-features = false, features = ["client-legacy"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1"] }
-openssl = { version = "0.10", default-features = false }
+openssl = { version = "0.10", optional = true, default-features = false }
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 utf8-read = { version = "0.4", default-features = false }
@@ -28,5 +28,6 @@ tempdir = "0.3.7"
 tokio = { version = "1.42.0", features = ["macros", "rt", "rt-multi-thread", "test-util"] }
 
 [features]
-default = ["base64"]
+default = ["base64", "https"]
 base64 = ["dep:base64"]
+https = ["dep:openssl", "dep:hyper-openssl"]

@@ -139,6 +139,13 @@ LND API server is fully active and ready for use
 generated BOLT11 invoice: lnbcrt100u1pnhkt4spp5wtxkappzcsrlkmgfs6g0zyct0hkhashh7hsaxz7e65slq9fkx7fsdqqcqzzsxqyz5vqsp5r5l0cs58vwaslfxx9che9kjm3udgpjsws9267t7mmj9jh4fy07gq9qxpqysgqxkelqfmpclv2uvfa34wh6rxdu08d9zhd73u3wvges2f238qy7w49wrmgymcdffj4z7hr8jy4qk6zn0evdlp95w4xwdwtlvsmnjcdc9gp22auz6
 ```
 
+## Feature Flags
+
+| Flag | Description | Enabled by Default |
+|:-:|:-:|:-:|
+| `base64` | Adds the `base64` module with utilities for base64 encoding (commonly needed to interact with the LND REST API). | Yes |
+| `https` | Pulls in the `openssl` crate to handle HTTPS connection authentication with LND's TLS certificates, which are typically self-signed. | Yes |
+
 ## Where are all the types/methods?
 
 This crate is a **thin** wrapper to encourage correct async usage of the LND REST API with minimal dependencies. Unlike other LND API wrappers, this crate intentionally does not declare or maintain Rust methods and typedefs for the numerous endpoints and data structures available on the [LND API](https://lightning.engineering/api-docs/api/lnd/).

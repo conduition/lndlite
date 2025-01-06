@@ -1,5 +1,8 @@
 #[cfg(feature = "base64")]
 pub mod base64;
+#[cfg(feature = "https")]
+pub mod https;
+
 mod errors;
 mod stream;
 
@@ -13,16 +16,16 @@ use serde::{de::DeserializeOwned, Serialize};
 
 // Re-exports
 pub use hyper;
-pub use hyper_openssl;
 pub use hyper_util;
-pub use openssl;
 pub use serde;
 pub use serde_json;
 
 // type alias/re-export
 pub use hyper_util::client::legacy::connect::{Connect, HttpConnector};
 pub type RequestBody = http_body_util::Full<hyper::body::Bytes>;
-pub type HttpsConnector = hyper_openssl::client::legacy::HttpsConnector<HttpConnector>;
+
+#[cfg(feature = "https")]
+pub use https::{self_signed_cert_connector, HttpsConnector};
 
 /// A simple alias trait
 pub trait Connector: Connect + Clone + Send + Sync + 'static {}
@@ -39,44 +42,6 @@ pub struct LndRestClient<C> {
 impl<C> std::fmt::Display for LndRestClient<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "LndRestClient({}://{})", self.scheme, self.address)
-    }
-}
-
-pub fn self_signed_https_connector(
-    tls_cert_pem: &[u8],
-) -> Result<HttpsConnector, InvalidCertificateError> {
-    use openssl::{
-        ssl::{SslConnector, SslMethod},
-        x509::{store::X509StoreBuilder, X509},
-    };
-
-    let root_store = {
-        let mut builder = X509StoreBuilder::new()?;
-        builder.add_cert(X509::from_pem(tls_cert_pem)?)?;
-        builder.build()
-    };
-
-    let mut ssl_builder = SslConnector::builder(SslMethod::tls_client())?;
-    ssl_builder.set_cert_store(root_store);
-
-    let mut http = HttpConnector::new();
-    http.enforce_http(false);
-
-    let https = HttpsConnector::with_connector(http, ssl_builder)?;
-    Ok(https)
-}
-
-impl LndRestClient<HttpsConnector> {
-    pub fn new_with_self_signed_cert(
-        address: String,
-        macaroon: &[u8],
-        tls_cert_pem: &[u8],
-    ) -> Result<Self, InvalidCertificateError> {
-        Ok(LndRestClient::new_with_connector(
-            address,
-            macaroon,
-            self_signed_https_connector(tls_cert_pem)?,
-        ))
     }
 }
 

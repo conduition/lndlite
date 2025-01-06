@@ -244,10 +244,11 @@ impl LND<HttpsConnector> {
             panic!("failed to read tls.cert from lnd tempdir: {e}");
         });
 
-        let connector = lndlite::self_signed_https_connector(&tls_cert_pem).unwrap_or_else(|e| {
-            let _ = child.kill();
-            panic!("tls.cert is invalid: {e}");
-        });
+        let connector =
+            lndlite::https::self_signed_cert_connector(&tls_cert_pem).unwrap_or_else(|e| {
+                let _ = child.kill();
+                panic!("tls.cert is invalid: {e}");
+            });
 
         let lnd = LND {
             tempdir,

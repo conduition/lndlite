@@ -18,11 +18,13 @@ impl fmt::Display for LndErrorResponse {
     }
 }
 
+#[cfg(feature = "https")]
 #[derive(Debug)]
 pub enum InvalidCertificateError {
     CertificateParseFailed(openssl::error::ErrorStack),
 }
 
+#[cfg(feature = "https")]
 impl fmt::Display for InvalidCertificateError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let msg = match self {
@@ -32,8 +34,10 @@ impl fmt::Display for InvalidCertificateError {
     }
 }
 
+#[cfg(feature = "https")]
 impl Error for InvalidCertificateError {}
 
+#[cfg(feature = "https")]
 impl From<openssl::error::ErrorStack> for InvalidCertificateError {
     fn from(e: openssl::error::ErrorStack) -> Self {
         InvalidCertificateError::CertificateParseFailed(e)
