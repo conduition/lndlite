@@ -30,7 +30,7 @@ struct AddInvoiceResponse {
 }
 
 /// could use a cipherseed mnemonic instead
-const XPRIV: &'static str = concat!(
+const XPRIV: &str = concat!(
     "tprv8ZgxMBicQKsPdpgo44ctecZXcupSdNCZL5gmLS6FiUzrjqePmp7",
     "KSSdJcCJ2z2w7aAh1poJBEQcLXi82KzeSg2tBZRvwwUynFrux1NUSuBa",
 );
