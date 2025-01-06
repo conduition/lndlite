@@ -44,9 +44,9 @@ impl From<openssl::error::ErrorStack> for InvalidCertificateError {
 pub enum BodyReadError {
     HttpFailure(hyper::Error),
     JsonParse(serde_json::Error),
+    ErrorEvent(LndErrorResponse),
     TooLarge,
     InvalidUtf8,
-    EmptyResponse,
 }
 
 impl fmt::Display for BodyReadError {
@@ -54,9 +54,9 @@ impl fmt::Display for BodyReadError {
         let msg = match self {
             Self::HttpFailure(e) => format!("HTTP protocol error: {e}"),
             Self::JsonParse(e) => format!("JSON parse failed: {e}"),
+            Self::ErrorEvent(e) => format!("received error event: {e}"),
             Self::TooLarge => "response body exceeds sane limit".to_string(),
             Self::InvalidUtf8 => "response body contains invalid UTF8 text".to_string(),
-            Self::EmptyResponse => "response body is empty".to_string(),
         };
         f.write_str(&msg)
     }

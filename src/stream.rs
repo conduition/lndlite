@@ -3,7 +3,7 @@
 //! API's subscription endpoints, such as
 //! [`/v1/channels/subscribe`](https://lightning.engineering/api-docs/api/lnd/lightning/subscribe-channel-events/).
 
-use crate::errors::{BodyReadError, RequestError, RequestErrorCause};
+use crate::errors::{BodyReadError, LndErrorResponse, RequestError, RequestErrorCause};
 use http_body_util::BodyExt;
 use hyper::body::Buf as _;
 use serde::de::DeserializeOwned;
@@ -26,7 +26,14 @@ enum DrainResult {
 /// [the official API reference](https://lightning.engineering/api-docs/api/lnd/).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StreamEvent<T> {
-    result: T,
+    #[serde(default = "default_option")]
+    result: Option<T>,
+    #[serde(default = "default_option")]
+    error: Option<LndErrorResponse>,
+}
+
+fn default_option<T>() -> Option<T> {
+    None
 }
 
 fn try_drain_newline_delim(
@@ -80,8 +87,11 @@ where
 
         match try_drain_newline_delim(&mut self.buf, 0)? {
             DrainResult::Drained(front) => {
-                let StreamEvent { result } = serde_json::from_slice(&front)?;
-                return Ok(Some(result));
+                let StreamEvent { result, error } = serde_json::from_slice(&front)?;
+                if let Some(err) = error {
+                    return Err(BodyReadError::ErrorEvent(err));
+                }
+                return Ok(result);
             }
             DrainResult::NoNewline(invalid_bytes) => {
                 trailing_invalid_bytes = invalid_bytes;
@@ -107,8 +117,11 @@ where
                     // parse response objects delimited by newlines
                     match try_drain_newline_delim(&mut self.buf, search_pos)? {
                         DrainResult::Drained(front) => {
-                            let StreamEvent { result } = serde_json::from_slice(&front)?;
-                            return Ok(Some(result));
+                            let StreamEvent { result, error } = serde_json::from_slice(&front)?;
+                            if let Some(err) = error {
+                                return Err(BodyReadError::ErrorEvent(err));
+                            }
+                            return Ok(result);
                         }
                         DrainResult::NoNewline(invalid_bytes) => {
                             trailing_invalid_bytes = invalid_bytes;
@@ -124,13 +137,16 @@ where
         }
 
         // We're fresh out of data frames in the response, but we didn't encounter any newlines.
-        // This must be a regular single-object response followed by EOF.
-        let output: O = serde_json::from_slice(&self.buf)?;
+        // This must be a single-object response followed by EOF as occurs with some error responses.
+        let StreamEvent { result, error } = serde_json::from_slice(&self.buf)?;
 
         // don't parse and return the same data object again.
         self.buf.truncate(0);
 
-        Ok(Some(output))
+        if let Some(err) = error {
+            return Err(BodyReadError::ErrorEvent(err));
+        }
+        return Ok(result);
     }
 }
 
@@ -168,6 +184,19 @@ mod tests {
         pin::Pin,
         task::{Context, Poll},
     };
+
+    impl<T: serde::Serialize> StreamEvent<T> {
+        fn result(result: T) -> Self {
+            StreamEvent {
+                result: Some(result),
+                error: None,
+            }
+        }
+
+        fn result_json(result: T) -> String {
+            serde_json::to_string(&Self::result(result)).unwrap()
+        }
+    }
 
     const EMOJI_SMILE: char = '😊';
     const EMOJI_BYTES: [u8; 4] = [0xF0, 0x9F, 0x98, 0x8A];
@@ -230,12 +259,12 @@ mod tests {
     #[tokio::test]
     async fn response_stream_handles_utf8_across_http_frame_boundaries() {
         let emoji_string = format!("{}{}", EMOJI_SMILE, EMOJI_SMILE);
-        let emoji_json_string = serde_json::to_string(&emoji_string).unwrap();
+        let emoji_json_string = format!("{}\n", StreamEvent::result_json(emoji_string.clone()),);
         let emoji_string_bytes = emoji_json_string.as_bytes();
         let body = MockBody::new(&[
-            &emoji_string_bytes[..3],
-            &emoji_string_bytes[3..5],
-            &emoji_string_bytes[5..],
+            &emoji_string_bytes[..8],
+            &emoji_string_bytes[8..12],
+            &emoji_string_bytes[12..],
         ]);
 
         let mut stream = ResponseStreamInner::new(body);
@@ -247,10 +276,7 @@ mod tests {
     #[tokio::test]
     async fn response_stream_handles_utf8_and_newlines() {
         let emoji_string = format!("{}{}", EMOJI_SMILE, EMOJI_SMILE);
-        let emoji_event = StreamEvent {
-            result: emoji_string.clone(),
-        };
-        let emoji_event_json = serde_json::to_string(&emoji_event).unwrap();
+        let emoji_event_json = StreamEvent::result_json(&emoji_string.clone());
 
         let emoji_json_strings_delimited = format!(
             "{}\n{}\n{}\n",
@@ -294,10 +320,7 @@ mod tests {
 
     #[tokio::test]
     async fn response_stream_handles_newlines_inside_strings() {
-        let mut json_string = serde_json::to_string(&StreamEvent {
-            result: "hello\nthere",
-        })
-        .unwrap();
+        let mut json_string = StreamEvent::result_json("hello\nthere".to_string());
         json_string.push('\n');
 
         let mut stream =

@@ -6,6 +6,7 @@ mod stream;
 pub use errors::*;
 pub use stream::*;
 
+use http_body_util::BodyExt as _;
 use hyper::{header::HeaderValue, Method};
 use hyper_util::client::legacy::Client as HyperClient;
 use serde::{de::DeserializeOwned, Serialize};
@@ -129,14 +130,45 @@ impl<C: Connector> LndRestClient<C> {
     ) -> Result<O, RequestError> {
         let endpoint = request.uri().path().to_string();
         let method = request.method().clone();
-        let mut stream = self.process_request_streamed(request).await?;
 
-        let value: O = stream.next().await?.ok_or_else(|| RequestError {
-            endpoint,
-            method,
-            cause: RequestErrorCause::BodyReadFailure(BodyReadError::EmptyResponse),
+        let response = self
+            .client
+            .request(request)
+            .await
+            .map_err(|e| RequestError {
+                endpoint: endpoint.clone(),
+                method: method.clone(),
+                cause: RequestErrorCause::HttpFailure(e),
+            })?;
+
+        let status = response.status();
+
+        // TODO: limit reader
+        let resp_body = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| RequestError {
+                endpoint: endpoint.clone(),
+                method: method.clone(),
+                cause: RequestErrorCause::BodyReadFailure(BodyReadError::HttpFailure(e)),
+            })?;
+
+        if !status.is_success() {
+            let details: Option<LndErrorResponse> =
+                serde_json::from_slice(&resp_body.to_bytes()).ok();
+            return Err(RequestError {
+                endpoint,
+                method,
+                cause: RequestErrorCause::BadStatusCode { status, details },
+            });
+        }
+
+        let value: O = serde_json::from_slice(&resp_body.to_bytes()).map_err(|e| RequestError {
+            endpoint: endpoint.clone(),
+            method: method.clone(),
+            cause: RequestErrorCause::BodyReadFailure(BodyReadError::JsonParse(e)),
         })?;
-
         Ok(value)
     }
 
@@ -158,18 +190,26 @@ impl<C: Connector> LndRestClient<C> {
             })?;
 
         let status = response.status();
-
-        let mut stream =
-            ResponseStream::new(method.clone(), endpoint.clone(), response.into_body());
+        let resp_body = response.into_body();
 
         if !status.is_success() {
-            let details: Option<LndErrorResponse> = stream.next().await?;
+            // TODO: limit reader
+            let body_collected = resp_body.collect().await.map_err(|e| RequestError {
+                endpoint: endpoint.clone(),
+                method: method.clone(),
+                cause: RequestErrorCause::BodyReadFailure(BodyReadError::HttpFailure(e)),
+            })?;
+
+            let details: Option<LndErrorResponse> =
+                serde_json::from_slice(&body_collected.to_bytes()).ok();
             return Err(RequestError {
                 endpoint,
                 method,
                 cause: RequestErrorCause::BadStatusCode { status, details },
             });
         }
+
+        let stream = ResponseStream::new(method.clone(), endpoint.clone(), resp_body);
         Ok(stream)
     }
 
@@ -198,6 +238,21 @@ impl<C: Connector> LndRestClient<C> {
         let body = RequestBody::new(hyper::body::Bytes::from(serialized_body));
         let req = self.new_request(Method::POST, endpoint, body)?;
         self.process_request(req).await
+    }
+
+    pub async fn post_streamed<B: Serialize>(
+        &self,
+        endpoint: &str,
+        body: B,
+    ) -> Result<ResponseStream, RequestError> {
+        let serialized_body = serde_json::to_vec(&body).map_err(|e| RequestError {
+            endpoint: endpoint.to_string(),
+            method: Method::POST,
+            cause: RequestErrorCause::RequestBodySerialize(e),
+        })?;
+        let body = RequestBody::new(hyper::body::Bytes::from(serialized_body));
+        let req = self.new_request(Method::POST, endpoint, body)?;
+        self.process_request_streamed(req).await
     }
 
     pub async fn delete<B: Serialize, O: DeserializeOwned>(

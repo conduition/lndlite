@@ -48,7 +48,7 @@ pub fn decode_urlsafe<T: TryFrom<Vec<u8>>>(s: impl AsRef<str>) -> Result<T, Deco
     T::try_from(bytes).map_err(|_| DecodeError::InvalidBytes)
 }
 
-#[derive(Clone, Copy, Debug, Hash, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Default, Clone, Copy, Debug, Hash, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Base64<T>(pub T);
 
 impl<T: AsRef<[u8]>> AsRef<[u8]> for Base64<T> {
